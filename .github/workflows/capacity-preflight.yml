@@ -1,0 +1,60 @@
+name: FFCC capacity preflight only
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  capacity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report capacity without pulling images or starting services
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Runner OS: $RUNNER_OS; architecture: $RUNNER_ARCH"
+          echo "CPU count: $(nproc)"
+          echo 'Filesystem capacity and type:'
+          df -hT / "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          echo 'Memory (MiB):'
+          free -m
+          echo 'Docker storage metadata:'
+          docker info --format 'Driver={{.Driver}} DockerRootDir={{.DockerRootDir}}'
+          docker system df
+          driver=$(docker info --format '{{.Driver}}')
+          docker_root=$(docker info --format '{{.DockerRootDir}}')
+          if [[ ! -d "$docker_root" ]]; then
+            echo 'Cannot inspect Docker storage filesystem; capacity assessment incomplete.'
+            exit 1
+          fi
+          df -hT "$docker_root"
+          available_bytes=$(df -B1 --output=avail "$docker_root" | tail -n 1 | tr -d ' ')
+          total_memory_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+          available_memory_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+          {
+            echo '## Capacity-only preflight'
+            echo "- Runner: standard ubuntu-24.04 x64"
+            echo "- CPUs: $(nproc)"
+            echo "- Docker driver: $driver"
+            echo "- Docker filesystem available bytes: $available_bytes"
+            echo "- Total memory KiB: $total_memory_kib"
+            echo "- Available memory KiB: $available_memory_kib"
+            echo '- No Supabase image pulls, services, SQL, migrations, source checkout or bundle restoration.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$driver" in
+            overlay2|overlayfs) echo 'Efficient copy-on-write Docker driver detected.' ;;
+            *) echo 'Storage driver is not confirmed efficient; do not proceed to full-history verification.'; exit 1 ;;
+          esac
+          if (( available_bytes < 10737418240 )); then
+            echo 'Less than 10 GiB available: below the proposed initial capacity gate.'
+            echo '- Assessment: below initial disk gate; full-history execution not recommended.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if (( available_memory_kib < 4194304 )); then
+            echo 'Less than 4 GiB memory available: insufficient conservative headroom.'
+            echo '- Assessment: below initial memory gate.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo 'Initial capacity gates passed; this is not full-history verification.'
+          echo '- Assessment: initial gates passed; full-history feasibility is provisional.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Prior vfs extraction exhausted the 32 GB local disk; the 40-60 GB earlier target was conservative, not a measured overlay2 requirement.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- These thresholds do not prove image extraction or migration success.' >> "$GITHUB_STEP_SUMMARY"
